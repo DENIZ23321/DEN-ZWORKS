@@ -1,32 +1,11 @@
 --[[
-YENİ PROFESYONEL PUAN SİSTEMİ
+YENİ PROFESYONEL PUAN SİSTEMİ - HUD FIX
 liderlik-tablosu
-Hız Başına Temel Puan:
-60-80 km/h = 12-15 puan
-80-100 km/h = 15 puan
-100-120 km/h = 18-22 puan
-120-150 km/h = 22-28 puan
-150-180 km/h = 28-35 puan
-180+ km/h = 35 puan
-Yakınlık Bonusu:
-< 1.5m = 2.0x (çok yakın!)
-< 2.0m = 1.8x (yakın)
-< 2.5m = 1.4x (normal)
-< 3.0m = 1.1x (uzak)
-Hız Bağımlı Kombo:
-60-100 km/h = Her 30 araçta 1x kombo
-100-150 km/h = Her 20 araçta 1x kombo
-150+ km/h = Her 10 araçta 1x kombo (yüksek hızda daha hızlı)
-Bonuslar:
-Steer Intensity (ne kadar çok makas atıyorsa) - yaw rate bazlı
-Speed Bonus (yüksek hızda puan penaltısı yok)
-Combo Multiplier
-son güncelleme notları da bu
-Assetto Corsa CSP Lua Scripti - Client side, CSP extra options ile yükle
-Server için ScoreTrackerPlugin gibi plugin ile leaderboard
+... (aynı kurallar)
+CSP Client Lua - Extra Options SCRIPT_TYPE=client
 ]]
 
--- Event for server (ScoreTrackerPlugin uyumlu, key'i makasScoreEnd yap)
+-- Event for server (ScoreTrackerPlugin uyumlu)
 local msg = ac.OnlineEvent({
     ac.StructItem.key("makasScoreEnd"),
     Score = ac.StructItem.int64(),
@@ -37,8 +16,8 @@ local msg = ac.OnlineEvent({
 -- Config
 local MAX_PROX_DIST = 3.0
 local MIN_OVERTAKE_REL_SPEED = 10  -- km/h
-local COMBO_DECAY_TIME = 8  -- saniye inactivity sonrası combo reset
-local STEER_INTENSITY_SCALE = 15  -- yaw rate / this * bonus (tune et)
+local COMBO_DECAY_TIME = 8
+local STEER_INTENSITY_SCALE = 15
 
 -- State
 local timePassed = 0
@@ -54,7 +33,7 @@ local glitter = {}
 local glitterCount = 0
 local comboColor = 0
 
--- Functions
+-- Functions (aynı)
 local function get_base_points(speedKmh)
     if speedKmh < 60 then return 0 end
     if speedKmh <= 80 then
@@ -112,10 +91,8 @@ end
 function script.update(dt)
     timePassed = timePassed + dt
     comboDecayTimer = comboDecayTimer + dt
-    if comboDecayTimer > COMBO_DECAY_TIME then
-        if combo > 1 then
-            addMessage("Combo Koptu!", -1)
-        end
+    if comboDecayTimer > COMBO_DECAY_TIME and combo > 1 then
+        addMessage("Combo Koptu!", -1)
         combo = 1
         comboProgress = 0
         comboDecayTimer = 0
@@ -123,14 +100,12 @@ function script.update(dt)
 
     local player = ac.getCar(0)
     if not player then return end
-    local pstate = ac.getCarState(0)  -- assuming 0 for player state
+    local pstate = ac.getCarState(0)
     local sim = ac.getSimState()
 
-    -- Get fwd and up
     local fwd = (player.orientation * vec3(0, 0, 1)):normalize()
     local up = (player.orientation * vec3(0, 1, 0)):normalize()
 
-    -- Process AIs
     for i = 1, sim:carsCount() - 1 do
         local ai = ac.getCar(i)
         if ai and ai.aiControlled then
@@ -143,7 +118,7 @@ function script.update(dt)
             local rel_long = rel_pos_local.z
 
             local rel_vel = player.velocity - ai.velocity
-            local rel_vel_long = rel_vel:dot(fwd) / 3.6  -- to kmh
+            local rel_vel_long = rel_vel:dot(fwd) / 3.6
 
             if lat_dist < MAX_PROX_DIST then
                 s.min_lat = math.min(s.min_lat, lat_dist)
@@ -152,7 +127,7 @@ function script.update(dt)
             end
 
             if rel_vel_long > MIN_OVERTAKE_REL_SPEED then
-                if s.last_long > 0 and rel_long < 0 then  -- overtake detected
+                if s.last_long > 0 and rel_long < 0 then
                     local speed = player.speedKmh
                     local base_p = get_base_points(speed)
                     if base_p > 0 then
@@ -170,10 +145,9 @@ function script.update(dt)
                             addMessage("COMBO! " .. combo .. "x", 1)
                         end
 
-                        addMessage("Makas + " .. points .. " (" .. math.floor(s.min_lat * 10)/10 .. "m)", 1)
+                        addMessage("Makas +" .. points .. " (" .. string.format("%.1f", s.min_lat) .. "m)", 1)
                         comboDecayTimer = 0
 
-                        -- Send to server if best
                         if totalScore > highestScore then
                             highestScore = totalScore
                             msg{
@@ -183,7 +157,6 @@ function script.update(dt)
                             }
                         end
                     end
-                    -- Reset for next
                     s.min_lat = math.huge
                     s.max_intensity = 0
                 end
@@ -192,13 +165,11 @@ function script.update(dt)
         end
     end
 
-    -- Update best
     if totalScore > highestScore then
         highestScore = totalScore
     end
 end
 
--- UI and messages update
 local function updateMessages(dt)
     comboColor = comboColor + dt * 15 * combo
     if comboColor > 360 then comboColor = comboColor - 360 end
@@ -247,51 +218,51 @@ function script.drawUI()
     local colorAccent = rgbm(0.2, 0.8, 1, 1)
     local colorCombo = rgbm.new(hsv(comboColor, math.saturate(combo / 8), 1):rgb(), math.saturate(combo / 5))
 
-    ui.beginTransparentWindow("makasScore", vec2(1700, 50), vec2(1920, 350))  -- Adjust for your setup
+    -- HUD SOL ÜST - SINGLE SCREEN İÇİN (triple için 1700,50 yap)
+    ui.beginTransparentWindow("makasScore", vec2(20, 40), vec2(380, 280))
     ui.beginOutline()
 
     ui.dwriteText(math.floor(totalScore) .. " pts", "Center", rgbm(1,1,1,1), vec2(0, 20))
-    ui.dwriteText(makasCount .. " Makas", "Center", colorGrey, vec2(0, 45))
+    ui.dwriteText(makasCount .. " Makas", "Center", colorGrey, vec2(-60, 45))
     ui.sameLine(120)
     ui.dwriteText(combo .. "x", "Center", colorCombo, vec2(0, 45))
     
-    ui.pushDwriteFont("Arial Bold", 24)
-    ui.dwriteText("REKOR: " .. math.floor(highestScore), "Center", colorAccent, vec2(0, 80))
+    ui.pushDwriteFont("Arial Bold", 28)
+    ui.dwriteText("REKOR: " .. math.floor(highestScore), "Center", colorAccent, vec2(0, 85))
     ui.popDwriteFont()
 
-    ui.popFont()
     ui.endOutline(rgbm(0,0,0,0.4))
+    ui.endTransparentWindow()
 
-    -- Messages
-    ui.pushDwriteFont("Arial", 18)
-    local startPos = ui.getCursor()
+    -- Messages (aynı window içinde değil, overlay gibi)
+    ui.pushDwriteFont("Arial", 20)
+    local startPos = vec2(30, 160)
     for i = 1, #messages do
         local m = messages[i]
         local f = math.saturate(1 - m.age / 3) * math.saturate(5 - m.currentPos)
-        ui.setCursor(startPos + vec2(10 + (1 - f * f * 40), (m.currentPos - 1) * 22))
+        ui.setCursor(startPos + vec2((1 - f * f * 40), (m.currentPos - 1) * 26))
         local col = m.mood == 1 and rgbm(0.2, 1, 0.4, f) or
                     m.mood == -1 and rgbm(1, 0.3, 0.3, f) or rgbm(1,1,1,f)
         ui.dwriteText(m.text, "Left", col, vec2(0,0))
     end
     ui.popDwriteFont()
 
-    -- Glitter
+    -- Glitter (screen relative)
+    ui.pushClipRect(vec4(0, 0, ui.screenWidth(), ui.screenHeight()))
     for i = 1, glitterCount do
         local g = glitter[i]
         ui.drawLine(g.pos - g.velocity * 2, g.pos + g.velocity * 2, g.color, 1.5)
     end
+    ui.popClipRect()
 
-    -- Clean old messages
+    -- Eski mesajları temizle
     for i = #messages, 1, -1 do
         if messages[i].age > 4 then
             table.remove(messages, i)
         end
     end
-
-    ui.endTransparentWindow()
 end
 
--- Reset on map load or session
 function script.mapLoaded()
     totalScore = 0
     makasCount = 0
@@ -303,9 +274,5 @@ function script.mapLoaded()
     glitter = {}
     glitterCount = 0
     timePassed = 0
-end
-
--- Optional prepare if needed
-function script.prepare(dt)
-    return true
+    ac.log("Makas Score HUD Loaded!")  -- CSP logda gör
 end
