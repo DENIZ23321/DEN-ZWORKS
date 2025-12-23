@@ -1,90 +1,311 @@
--- NOHESI STYLE SCORE SYSTEM
--- CSP LUA SCRIPT
+--[[
+YENİ PROFESYONEL PUAN SİSTEMİ
+liderlik-tablosu
+Hız Başına Temel Puan:
+60-80 km/h = 12-15 puan
+80-100 km/h = 15 puan
+100-120 km/h = 18-22 puan
+120-150 km/h = 22-28 puan
+150-180 km/h = 28-35 puan
+180+ km/h = 35 puan
+Yakınlık Bonusu:
+< 1.5m = 2.0x (çok yakın!)
+< 2.0m = 1.8x (yakın)
+< 2.5m = 1.4x (normal)
+< 3.0m = 1.1x (uzak)
+Hız Bağımlı Kombo:
+60-100 km/h = Her 30 araçta 1x kombo
+100-150 km/h = Her 20 araçta 1x kombo
+150+ km/h = Her 10 araçta 1x kombo (yüksek hızda daha hızlı)
+Bonuslar:
+Steer Intensity (ne kadar çok makas atıyorsa) - yaw rate bazlı
+Speed Bonus (yüksek hızda puan penaltısı yok)
+Combo Multiplier
+son güncelleme notları da bu
+Assetto Corsa CSP Lua Scripti - Client side, CSP extra options ile yükle
+Server için ScoreTrackerPlugin gibi plugin ile leaderboard
+]]
 
-local score = 0
+-- Event for server (ScoreTrackerPlugin uyumlu, key'i makasScoreEnd yap)
+local msg = ac.OnlineEvent({
+    ac.StructItem.key("makasScoreEnd"),
+    Score = ac.StructItem.int64(),
+    Multiplier = ac.StructItem.int32(),
+    Car = ac.StructItem.string(64),
+})
+
+-- Config
+local MAX_PROX_DIST = 3.0
+local MIN_OVERTAKE_REL_SPEED = 10  -- km/h
+local COMBO_DECAY_TIME = 8  -- saniye inactivity sonrası combo reset
+local STEER_INTENSITY_SCALE = 15  -- yaw rate / this * bonus (tune et)
+
+-- State
+local timePassed = 0
+local totalScore = 0
+local makasCount = 0
 local combo = 1
-local passedCars = 0
-local lastPassTime = 0
+local comboProgress = 0
+local highestScore = 0
+local comboDecayTimer = 0
+local aiStates = {}
+local messages = {}
+local glitter = {}
+local glitterCount = 0
+local comboColor = 0
 
-function getSpeedPoints(speed)
-    if speed < 60 then return 0 end
-    if speed < 80 then return 13 end
-    if speed < 100 then return 15 end
-    if speed < 120 then return math.random(18,22) end
-    if speed < 150 then return math.random(22,28) end
-    if speed < 180 then return math.random(28,35) end
-    return 35
+-- Functions
+local function get_base_points(speedKmh)
+    if speedKmh < 60 then return 0 end
+    if speedKmh <= 80 then
+        return 12 + (speedKmh - 60) / 20 * 3
+    elseif speedKmh <= 100 then
+        return 15
+    elseif speedKmh <= 120 then
+        return 18 + (speedKmh - 100) / 20 * 4
+    elseif speedKmh <= 150 then
+        return 22 + (speedKmh - 120) / 30 * 6
+    elseif speedKmh <= 180 then
+        return 28 + (speedKmh - 150) / 30 * 7
+    else
+        return 35
+    end
 end
 
-function getProximityMultiplier(dist)
-    if dist < 1.5 then return 2.0 end
-    if dist < 2.0 then return 1.8 end
-    if dist < 2.5 then return 1.4 end
-    if dist < 3.0 then return 1.1 end
-    return 1.0
+local function get_combo_step(speedKmh)
+    if speedKmh < 100 then return 30
+    elseif speedKmh < 150 then return 20
+    else return 10 end
 end
 
-function getComboRequirement(speed)
-    if speed < 100 then return 30 end
-    if speed < 150 then return 20 end
-    return 10
+local function get_prox_mult(dist)
+    if dist < 1.5 then return 2.0
+    elseif dist < 2.0 then return 1.8
+    elseif dist < 2.5 then return 1.4
+    elseif dist < 3.0 then return 1.1
+    else return 0 end
+end
+
+local function reset_ai_state(idx)
+    aiStates[idx] = {last_long = 0, min_lat = math.huge, max_intensity = 0}
+end
+
+local function addMessage(text, mood)
+    for i = math.min(#messages + 1, 5), 2, -1 do
+        messages[i] = messages[i - 1]
+    end
+    messages[1] = {text = text, age = 0, targetPos = 1, currentPos = 1, mood = mood}
+    if mood == 1 then
+        for i = 1, 30 do
+            local dir = vec2(math.random() - 0.5, math.random() - 0.5)
+            glitterCount = glitterCount + 1
+            glitter[glitterCount] = {
+                color = rgbm.new(hsv(math.random() * 360, 1, 1):rgb(), 1),
+                pos = vec2(80, 140) + dir * vec2(40, 20),
+                velocity = dir:normalize():scale(0.3 + math.random() * 0.2),
+                life = 0.8 + 0.4 * math.random()
+            }
+        end
+    end
 end
 
 function script.update(dt)
-    local car = ac.getCar(0)
-    if not car then return end
+    timePassed = timePassed + dt
+    comboDecayTimer = comboDecayTimer + dt
+    if comboDecayTimer > COMBO_DECAY_TIME then
+        if combo > 1 then
+            addMessage("Combo Koptu!", -1)
+        end
+        combo = 1
+        comboProgress = 0
+        comboDecayTimer = 0
+    end
 
-    local speed = car.speedKmh
-    if speed < 60 then return end
+    local player = ac.getCar(0)
+    if not player then return end
+    local pstate = ac.getCarState(0)  -- assuming 0 for player state
+    local sim = ac.getSimState()
 
-    -- En yakın araç
-    local closestDist = 999
-    for i = 1, sim.carsCount - 1 do
-        local other = ac.getCar(i)
-        if other then
-            local dist = car.position:distance(other.position)
-            if dist < closestDist then
-                closestDist = dist
+    -- Get fwd and up
+    local fwd = (player.orientation * vec3(0, 0, 1)):normalize()
+    local up = (player.orientation * vec3(0, 1, 0)):normalize()
+
+    -- Process AIs
+    for i = 1, sim:carsCount() - 1 do
+        local ai = ac.getCar(i)
+        if ai and ai.aiControlled then
+            if not aiStates[i] then reset_ai_state(i) end
+            local s = aiStates[i]
+
+            local rel_pos = ai.position - player.position
+            local rel_pos_local = player.orientation:inverse() * rel_pos
+            local lat_dist = math.abs(rel_pos_local.x)
+            local rel_long = rel_pos_local.z
+
+            local rel_vel = player.velocity - ai.velocity
+            local rel_vel_long = rel_vel:dot(fwd) / 3.6  -- to kmh
+
+            if lat_dist < MAX_PROX_DIST then
+                s.min_lat = math.min(s.min_lat, lat_dist)
+                local yaw_rate = math.abs(pstate.angularVelocity:dot(up))
+                s.max_intensity = math.max(s.max_intensity, yaw_rate)
             end
+
+            if rel_vel_long > MIN_OVERTAKE_REL_SPEED then
+                if s.last_long > 0 and rel_long < 0 then  -- overtake detected
+                    local speed = player.speedKmh
+                    local base_p = get_base_points(speed)
+                    if base_p > 0 then
+                        local prox_m = get_prox_mult(s.min_lat)
+                        local steer_m = 1 + math.min(0.8, s.max_intensity / STEER_INTENSITY_SCALE)
+                        local points = math.floor(base_p * prox_m * steer_m * combo)
+                        totalScore = totalScore + points
+                        makasCount = makasCount + 1
+
+                        local step = get_combo_step(speed)
+                        comboProgress = comboProgress + 1 / step
+                        while comboProgress >= 1 do
+                            combo = combo + 1
+                            comboProgress = comboProgress - 1
+                            addMessage("COMBO! " .. combo .. "x", 1)
+                        end
+
+                        addMessage("Makas + " .. points .. " (" .. math.floor(s.min_lat * 10)/10 .. "m)", 1)
+                        comboDecayTimer = 0
+
+                        -- Send to server if best
+                        if totalScore > highestScore then
+                            highestScore = totalScore
+                            msg{
+                                Score = totalScore,
+                                Multiplier = combo,
+                                Car = ac.getCarName(0)
+                            }
+                        end
+                    end
+                    -- Reset for next
+                    s.min_lat = math.huge
+                    s.max_intensity = 0
+                end
+            end
+            s.last_long = rel_long
         end
     end
 
-    local proximity = getProximityMultiplier(closestDist)
-    local steerBonus = math.min(math.abs(car.steerAngle) * 0.25, 1.5)
+    -- Update best
+    if totalScore > highestScore then
+        highestScore = totalScore
+    end
+end
 
-    local points = getSpeedPoints(speed)
-    if points == 0 then return end
+-- UI and messages update
+local function updateMessages(dt)
+    comboColor = comboColor + dt * 15 * combo
+    if comboColor > 360 then comboColor = comboColor - 360 end
 
-    score = score + (points * proximity * combo * (1 + steerBonus))
-
-    -- Araç geçme algısı
-    if closestDist < 2.5 then
-        passedCars = passedCars + 1
-        lastPassTime = os.clock()
+    for i = 1, #messages do
+        local m = messages[i]
+        m.age = m.age + dt
+        m.currentPos = ui.applyLag(m.currentPos, m.targetPos, 0.8, dt)
     end
 
-    if passedCars >= getComboRequirement(speed) then
-        combo = combo + 1
-        passedCars = 0
+    for i = glitterCount, 1, -1 do
+        local g = glitter[i]
+        g.pos = g.pos + g.velocity
+        g.velocity.y = g.velocity.y + 0.015
+        g.life = g.life - dt
+        g.color.a = math.saturate(g.life * 2.5)
+        if g.life < 0 then
+            glitter[i] = glitter[glitterCount]
+            glitterCount = glitterCount - 1
+        end
     end
 
-    -- Combo reset
-    if os.clock() - lastPassTime > 3 then
-        combo = 1
-        passedCars = 0
-    end
-
-    -- Çarpma cezası
-    if car.collided then
-        combo = 1
-        score = math.max(0, score - 200)
+    if combo > 1 and math.random() > 0.95 then
+        for _ = 1, math.min(5, combo) do
+            local dir = vec2(math.random() - 0.5, math.random() - 0.5)
+            glitterCount = glitterCount + 1
+            glitter[glitterCount] = {
+                color = rgbm.new(hsv(math.random() * 360, 1, 1):rgb(), 1),
+                pos = vec2(200, 80) + dir * vec2(30, 15),
+                velocity = dir:normalize():scale(0.15 + math.random() * 0.15),
+                life = 0.6 + 0.4 * math.random()
+            }
+        end
     end
 end
 
 function script.drawUI()
-    ui.beginTransparentWindow("NoHesi Pro Score", vec2(50, 300), vec2(300, 140))
-    ui.text("🏁 SCORE: " .. math.floor(score))
-    ui.text("🔥 COMBO: x" .. combo)
-    ui.text("🚗 PASSED: " .. passedCars)
-    ui.endWindow()
+    local uiState = ac.getUIState()
+    updateMessages(uiState.dt)
+
+    local player = ac.getCar(0)
+    if not player then return end
+
+    local colorDark = rgbm(0.3, 0.3, 0.3, 0.9)
+    local colorGrey = rgbm(0.6, 0.6, 0.6, 1)
+    local colorAccent = rgbm(0.2, 0.8, 1, 1)
+    local colorCombo = rgbm.new(hsv(comboColor, math.saturate(combo / 8), 1):rgb(), math.saturate(combo / 5))
+
+    ui.beginTransparentWindow("makasScore", vec2(1700, 50), vec2(1920, 350))  -- Adjust for your setup
+    ui.beginOutline()
+
+    ui.dwriteText(math.floor(totalScore) .. " pts", "Center", rgbm(1,1,1,1), vec2(0, 20))
+    ui.dwriteText(makasCount .. " Makas", "Center", colorGrey, vec2(0, 45))
+    ui.sameLine(120)
+    ui.dwriteText(combo .. "x", "Center", colorCombo, vec2(0, 45))
+    
+    ui.pushDwriteFont("Arial Bold", 24)
+    ui.dwriteText("REKOR: " .. math.floor(highestScore), "Center", colorAccent, vec2(0, 80))
+    ui.popDwriteFont()
+
+    ui.popFont()
+    ui.endOutline(rgbm(0,0,0,0.4))
+
+    -- Messages
+    ui.pushDwriteFont("Arial", 18)
+    local startPos = ui.getCursor()
+    for i = 1, #messages do
+        local m = messages[i]
+        local f = math.saturate(1 - m.age / 3) * math.saturate(5 - m.currentPos)
+        ui.setCursor(startPos + vec2(10 + (1 - f * f * 40), (m.currentPos - 1) * 22))
+        local col = m.mood == 1 and rgbm(0.2, 1, 0.4, f) or
+                    m.mood == -1 and rgbm(1, 0.3, 0.3, f) or rgbm(1,1,1,f)
+        ui.dwriteText(m.text, "Left", col, vec2(0,0))
+    end
+    ui.popDwriteFont()
+
+    -- Glitter
+    for i = 1, glitterCount do
+        local g = glitter[i]
+        ui.drawLine(g.pos - g.velocity * 2, g.pos + g.velocity * 2, g.color, 1.5)
+    end
+
+    -- Clean old messages
+    for i = #messages, 1, -1 do
+        if messages[i].age > 4 then
+            table.remove(messages, i)
+        end
+    end
+
+    ui.endTransparentWindow()
+end
+
+-- Reset on map load or session
+function script.mapLoaded()
+    totalScore = 0
+    makasCount = 0
+    combo = 1
+    comboProgress = 0
+    comboDecayTimer = 0
+    aiStates = {}
+    messages = {}
+    glitter = {}
+    glitterCount = 0
+    timePassed = 0
+end
+
+-- Optional prepare if needed
+function script.prepare(dt)
+    return true
 end
